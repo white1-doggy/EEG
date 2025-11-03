@@ -13,10 +13,17 @@ from utils.stft import compute_stft
 
 @dataclass
 class EEGSample:
-    x_raw: torch.Tensor
-    center_id: int
-    subject_id: str
-    y: int
+    """Container for individual EEG samples.
+
+    ``x_raw`` may be omitted if ``path`` is provided. In that case the dataset will
+    lazily load the raw signal from disk when the sample is accessed.
+    """
+
+    x_raw: Optional[torch.Tensor] = None
+    path: Optional[Path] = None
+    center_id: int = 0
+    subject_id: str = ""
+    y: int = 0
     welch_rel: Optional[torch.Tensor] = None
     fooof_slope: Optional[torch.Tensor] = None
     fooof_offset: Optional[torch.Tensor] = None
@@ -61,11 +68,16 @@ class EEGDataset(Dataset):
     def _ensure_sample(sample: EEGSample | Dict) -> EEGSample:
         if isinstance(sample, EEGSample):
             return sample
+        tensor = sample.get("x_raw")
+        if tensor is not None and not torch.is_tensor(tensor):
+            tensor = torch.as_tensor(tensor)
+        path = sample.get("path") or sample.get("file") or sample.get("source")
         return EEGSample(
-            x_raw=sample["x_raw"],
+            x_raw=tensor,
+            path=Path(path) if path is not None else None,
             center_id=int(sample.get("center_id", 0)),
             subject_id=str(sample.get("subject_id", "")),
-            y=int(sample["y"]),
+            y=int(sample.get("y", 0)),
             welch_rel=sample.get("welch_rel"),
             fooof_slope=sample.get("fooof_slope"),
             fooof_offset=sample.get("fooof_offset"),
@@ -105,7 +117,7 @@ class EEGDataset(Dataset):
 
     def __getitem__(self, index: int) -> Dict:  # type: ignore[override]
         sample = self.samples[index]
-        x_raw = sample.x_raw.clone()
+        x_raw = self._load_x_raw(sample)
         if self.transform is not None:
             x_raw = self.transform(x_raw)
         if x_raw.dim() != 2:
@@ -146,3 +158,30 @@ class EEGDataset(Dataset):
         assert log_power.shape == (c, f, tf), log_power.shape
         freqs = torch.linspace(0, math.pi, f)
         return log_power, freqs, tf
+
+    def _load_x_raw(self, sample: EEGSample) -> torch.Tensor:
+        if sample.x_raw is not None:
+            return sample.x_raw.clone()
+        if sample.path is None:
+            raise ValueError("Sample has neither in-memory data nor file path.")
+        suffix = sample.path.suffix.lower()
+        if suffix == ".set":
+            return self._load_from_set(sample)
+        raise ValueError(f"Unsupported EEG file format: {sample.path}")
+
+    def _load_from_set(self, sample: EEGSample) -> torch.Tensor:
+        try:
+            import mne
+        except ImportError as exc:  # pragma: no cover - informative failure path
+            raise ImportError(
+                "Reading .set files requires the 'mne' package. Install it via 'pip install mne'."
+            ) from exc
+
+        if sample.path is None:
+            raise ValueError("Cannot load .set file without a valid path")
+        raw = mne.io.read_raw_eeglab(str(sample.path), preload=True, verbose=False)
+        data = raw.get_data()  # [C, T]
+        tensor = torch.from_numpy(data).float()
+        # Cache loaded tensor to avoid reloading on subsequent epochs.
+        sample.x_raw = tensor
+        return tensor.clone()

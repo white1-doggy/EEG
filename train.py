@@ -49,7 +49,16 @@ class DomainDiscriminator(nn.Module):
         return self.net(x)
 
 
+def _load_directory_samples(path: Path) -> List[Dict[str, Any]]:
+    set_files = sorted(path.rglob("*.set"))
+    if not set_files:
+        raise FileNotFoundError(f"No .set files found under {path}.")
+    return [{"path": f} for f in set_files]
+
+
 def load_samples(path: Path) -> Iterable[Dict]:
+    if path.is_dir():
+        return _load_directory_samples(path)
     data = torch.load(path)
     if isinstance(data, dict) and "samples" in data:
         return data["samples"]
@@ -147,7 +156,10 @@ def build_dataloaders(cfg: Dict, args: argparse.Namespace) -> Tuple[DataLoader, 
     graph_path = Path(graph_path) if graph_path else None
     data_file = Path(args.data_file)
     samples = list(load_samples(data_file))
-    split_path = Path(args.split_file) if args.split_file else data_file.with_suffix(".splits.yaml")
+    if args.split_file:
+        split_path = Path(args.split_file)
+    else:
+        split_path = data_file / "splits.yaml" if data_file.is_dir() else data_file.with_suffix(".splits.yaml")
     ratios = tuple(args.split_ratios)
     if len(ratios) != 3:
         raise ValueError("--split-ratios must contain exactly three values (train, val, test).")
@@ -272,7 +284,12 @@ def train(cfg: Dict, args: argparse.Namespace) -> None:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train EEG addiction model")
     parser.add_argument("--config", type=str, default="configs/default.yaml")
-    parser.add_argument("--data-file", type=str, required=True, help="Path to the full dataset manifest (.pt/.pth)")
+    parser.add_argument(
+        "--data-file",
+        type=str,
+        required=True,
+        help="Path to the dataset directory containing .set files or a serialized manifest (.pt/.pth)",
+    )
     parser.add_argument("--split-file", type=str, default="", help="Optional path to dataset split YAML file")
     parser.add_argument(
         "--split-ratios",
