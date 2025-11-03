@@ -23,8 +23,12 @@ This repository implements a full training and evaluation pipeline for multimoda
 ## Training
 
 ```bash
-./run.sh train --config configs/default.yaml --train-data path/to/train.pt --val-data path/to/val.pt --output-dir checkpoints --amp
+./run.sh train --config configs/default.yaml --data-file path/to/dataset.pt --output-dir checkpoints --amp
 ```
+
+When provided with a single dataset file, `train.py` automatically looks for a YAML split file (defaults to `dataset.splits.yaml`).
+If the file does not exist, it is generated with a 7 : 1.5 : 1.5 train/validation/test ratio (customisable via `--split-ratios`).
+Re-run training with `--split-file path/to/splits.yaml` to reuse or share the same split definition.
 
 The script uses AdamW with cosine warmup, mixed precision (optional), and supports domain adversarial training (enable via the configuration `train.use_dann`).
 

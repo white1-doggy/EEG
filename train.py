@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import argparse
 import math
+import random
 from pathlib import Path
-from typing import Dict, Iterable, Tuple
+from typing import Any, Dict, Iterable, List, Tuple
 
 import torch
 import torch.nn as nn
@@ -55,19 +56,112 @@ def load_samples(path: Path) -> Iterable[Dict]:
     return data
 
 
+def _describe_sample(sample: Any, index: int) -> str:
+    if isinstance(sample, dict):
+        for key in ("sample_id", "id", "subject_id", "file", "path", "name"):
+            value = sample.get(key)
+            if value:
+                return str(value)
+    else:
+        for key in ("sample_id", "id", "subject_id", "file", "path", "name"):
+            if hasattr(sample, key):
+                value = getattr(sample, key)
+                if value:
+                    return str(value)
+    return str(index)
+
+
+def _compute_split_lengths(num_samples: int, ratios: Tuple[float, float, float]) -> List[int]:
+    total = sum(ratios)
+    if total <= 0:
+        raise ValueError("Split ratios must sum to a positive value.")
+    base = [int(num_samples * r / total) for r in ratios]
+    diff = num_samples - sum(base)
+    for i in range(diff):
+        base[i % len(base)] += 1
+    return base
+
+
+def ensure_split_file(
+    samples: List[Any],
+    split_path: Path,
+    ratios: Tuple[float, float, float],
+    seed: int,
+) -> Dict[str, List[int]]:
+    if split_path.exists():
+        with open(split_path, "r", encoding="utf-8") as f:
+            data = yaml.safe_load(f) or {}
+        split_data = data.get("splits", data)
+        splits: Dict[str, List[int]] = {}
+        for key in ("train", "val", "test"):
+            entries = split_data.get(key, [])
+            indices = []
+            for entry in entries:
+                if isinstance(entry, dict) and "index" in entry:
+                    indices.append(int(entry["index"]))
+                else:
+                    indices.append(int(entry))
+            splits[key] = indices
+        return splits
+
+    rng = random.Random(seed)
+    indices = list(range(len(samples)))
+    rng.shuffle(indices)
+    lengths = _compute_split_lengths(len(samples), ratios)
+    names = ("train", "val", "test")
+    splits = {}
+    cursor = 0
+    for name, length in zip(names, lengths):
+        splits[name] = indices[cursor : cursor + length]
+        cursor += length
+
+    split_path.parent.mkdir(parents=True, exist_ok=True)
+    meta = {
+        "ratios": {
+            "train": ratios[0],
+            "val": ratios[1],
+            "test": ratios[2],
+        },
+        "seed": seed,
+        "num_samples": len(samples),
+    }
+    serialisable = {
+        "meta": meta,
+        "splits": {
+            name: [
+                {"index": idx, "id": _describe_sample(samples[idx], idx)} for idx in sorted(idxs)
+            ]
+            for name, idxs in splits.items()
+        },
+    }
+    with open(split_path, "w", encoding="utf-8") as f:
+        yaml.safe_dump(serialisable, f)
+    print(f"Saved new split file to {split_path} with lengths {[len(splits[n]) for n in names]}")
+    return splits
+
+
 def build_dataloaders(cfg: Dict, args: argparse.Namespace) -> Tuple[DataLoader, DataLoader]:
     stft_cfg = cfg["stft"]
     bands = cfg["bands"]
     graph_path = cfg.get("graph_path")
     graph_path = Path(graph_path) if graph_path else None
-    train_samples = list(load_samples(Path(args.train_data)))
-    val_samples = list(load_samples(Path(args.val_data))) if args.val_data else []
+    data_file = Path(args.data_file)
+    samples = list(load_samples(data_file))
+    split_path = Path(args.split_file) if args.split_file else data_file.with_suffix(".splits.yaml")
+    ratios = tuple(args.split_ratios)
+    if len(ratios) != 3:
+        raise ValueError("--split-ratios must contain exactly three values (train, val, test).")
+    splits = ensure_split_file(samples, split_path, ratios, args.split_seed)
+    train_samples = [samples[i] for i in splits.get("train", [])]
+    val_indices = splits.get("val", [])
+    val_samples = [samples[i] for i in val_indices]
     train_dataset = EEGDataset(train_samples, stft_cfg, bands, graph_path=graph_path)
     val_dataset = EEGDataset(val_samples, stft_cfg, bands, graph_path=graph_path) if val_samples else None
-    train_loader = DataLoader(train_dataset, batch_size=cfg["train"]["batch_size"], shuffle=True, drop_last=True)
+    batch_size = cfg["train"]["batch_size"]
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, drop_last=True)
     val_loader = None
     if val_dataset is not None and len(val_dataset) > 0:
-        val_loader = DataLoader(val_dataset, batch_size=cfg["train"]["batch_size"], shuffle=False)
+        val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
     return train_loader, val_loader
 
 
@@ -178,8 +272,17 @@ def train(cfg: Dict, args: argparse.Namespace) -> None:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train EEG addiction model")
     parser.add_argument("--config", type=str, default="configs/default.yaml")
-    parser.add_argument("--train-data", type=str, required=True)
-    parser.add_argument("--val-data", type=str, default="")
+    parser.add_argument("--data-file", type=str, required=True, help="Path to the full dataset manifest (.pt/.pth)")
+    parser.add_argument("--split-file", type=str, default="", help="Optional path to dataset split YAML file")
+    parser.add_argument(
+        "--split-ratios",
+        type=float,
+        nargs=3,
+        default=(7.0, 1.5, 1.5),
+        metavar=("TRAIN", "VAL", "TEST"),
+        help="Ratios for train/val/test split when generating a new split file",
+    )
+    parser.add_argument("--split-seed", type=int, default=42, help="Random seed for split generation")
     parser.add_argument("--output-dir", type=str, default="checkpoints")
     parser.add_argument("--amp", action="store_true")
     return parser.parse_args()
