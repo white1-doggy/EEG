@@ -1,0 +1,32 @@
+fs: 250
+seg_len_s: 8
+stft:
+  window: 250
+  hop: 125
+  nfft: 512
+bands:
+  - [1, 4]
+  - [4, 8]
+  - [8, 12]
+  - [13, 30]
+  - [30, 45]
+model:
+  E_spec: 128
+  E_graph: 64
+  E_cfc: 32
+  transformer:
+    depth: 3
+    heads: 6
+    dim: 256
+loss_weights:
+  lb: 0.5
+  la: 0.3
+  lc: 0.5
+  lm1: 0.001
+  lm2: 0.001
+  lm3: 0.001
+train:
+  lr: 0.0003
+  batch_size: 32
+  max_epochs: 120
+  gate_warmup_epochs: 10
