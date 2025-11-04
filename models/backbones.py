@@ -95,6 +95,67 @@ class GNN(nn.Module):
         return h
 
 
+class MultiHeadSelfAttention(nn.Module):
+    def __init__(self, dim: int, heads: int, attn_dropout: float = 0.0, proj_dropout: float = 0.0) -> None:
+        super().__init__()
+        if dim % heads != 0:
+            raise ValueError("Transformer dimension must be divisible by number of heads.")
+        self.dim = dim
+        self.heads = heads
+        self.head_dim = dim // heads
+        self.scale = self.head_dim ** -0.5
+        self.qkv = nn.Linear(dim, dim * 3, bias=False)
+        self.attn_drop = nn.Dropout(attn_dropout)
+        self.proj = nn.Linear(dim, dim)
+        self.proj_drop = nn.Dropout(proj_dropout)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: [B, N, C]
+        b, n, c = x.shape
+        qkv = (
+            self.qkv(x)
+            .reshape(b, n, 3, self.heads, self.head_dim)
+            .permute(2, 0, 3, 1, 4)
+        )
+        q, k, v = qkv[0], qkv[1], qkv[2]
+        attn = torch.matmul(q, k.transpose(-2, -1)) * self.scale
+        attn = torch.softmax(attn, dim=-1)
+        attn = self.attn_drop(attn)
+        out = torch.matmul(attn, v)
+        out = out.transpose(1, 2).reshape(b, n, c)
+        out = self.proj(out)
+        out = self.proj_drop(out)
+        return out
+
+
+class TemporalTransformerBlock(nn.Module):
+    def __init__(
+        self,
+        dim: int,
+        heads: int,
+        mlp_ratio: float = 4.0,
+        dropout: float = 0.0,
+        attn_dropout: float = 0.0,
+    ) -> None:
+        super().__init__()
+        hidden = int(dim * mlp_ratio)
+        self.norm1 = nn.LayerNorm(dim)
+        self.attn = MultiHeadSelfAttention(dim, heads, attn_dropout=attn_dropout, proj_dropout=dropout)
+        self.norm2 = nn.LayerNorm(dim)
+        self.mlp = nn.Sequential(
+            nn.Linear(dim, hidden),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden, dim),
+            nn.Dropout(dropout),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        residual = x + self.attn(self.norm1(x))
+        output = residual + self.mlp(self.norm2(residual))
+        return output
+
+
 class TemporalTransformer(nn.Module):
     def __init__(self, cfg: dict) -> None:
         super().__init__()
@@ -103,16 +164,30 @@ class TemporalTransformer(nn.Module):
         self.dim = int(transformer_cfg.get("dim", 256))
         depth = int(transformer_cfg.get("depth", 3))
         heads = int(transformer_cfg.get("heads", 6))
-        self.input_proj = nn.Linear(model_cfg.get("E_spec", 128) + model_cfg.get("E_graph", 64) + model_cfg.get("E_cfc", 32), self.dim)
-        encoder_layer = nn.TransformerEncoderLayer(d_model=self.dim, nhead=heads, batch_first=True)
-        self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=depth)
-        self.cls_proj = nn.Linear(model_cfg.get("E_spec", 128) + model_cfg.get("E_graph", 64) + model_cfg.get("E_cfc", 32), self.dim)
+        dropout = float(transformer_cfg.get("dropout", 0.0))
+        attn_dropout = float(transformer_cfg.get("attn_dropout", dropout))
+        mlp_ratio = float(transformer_cfg.get("mlp_ratio", 4.0))
+        fused_dim = model_cfg.get("E_spec", 128) + model_cfg.get("E_graph", 64) + model_cfg.get("E_cfc", 32)
+        self.input_proj = nn.Linear(fused_dim, self.dim)
+        self.cls_proj = nn.Linear(fused_dim, self.dim)
+        self.layers = nn.ModuleList(
+            [
+                TemporalTransformerBlock(
+                    dim=self.dim,
+                    heads=heads,
+                    mlp_ratio=mlp_ratio,
+                    dropout=dropout,
+                    attn_dropout=attn_dropout,
+                )
+                for _ in range(depth)
+            ]
+        )
 
     def forward(self, x: torch.Tensor, cls_init: Optional[torch.Tensor] = None) -> torch.Tensor:
         # x: [B, Tf, E]
         if x.dim() != 3:
             raise ValueError("Temporal input must be [B, Tf, E].")
-        b, tf, e = x.shape
+        b, tf, _ = x.shape
         h = self.input_proj(x)
         pos = self._positional_encoding(tf, self.dim, device=x.device)
         h = h + pos
@@ -121,8 +196,9 @@ class TemporalTransformer(nn.Module):
         else:
             cls_token = self.cls_proj(cls_init).unsqueeze(1)
         tokens = torch.cat([cls_token, h], dim=1)
-        encoded = self.encoder(tokens)
-        cls = encoded[:, 0]
+        for layer in self.layers:
+            tokens = layer(tokens)
+        cls = tokens[:, 0]
         return cls
 
     def _positional_encoding(self, length: int, dim: int, device: torch.device) -> torch.Tensor:
