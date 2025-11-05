@@ -167,8 +167,31 @@ def build_dataloaders(cfg: Dict, args: argparse.Namespace) -> Tuple[DataLoader, 
     train_samples = [samples[i] for i in splits.get("train", [])]
     val_indices = splits.get("val", [])
     val_samples = [samples[i] for i in val_indices]
-    train_dataset = EEGDataset(train_samples, stft_cfg, bands, graph_path=graph_path)
-    val_dataset = EEGDataset(val_samples, stft_cfg, bands, graph_path=graph_path) if val_samples else None
+    fs = int(cfg.get("fs", 250))
+    seg_len_s = float(cfg.get("seg_len_s", 8.0))
+    seg_stride_s = cfg.get("seg_stride_s")
+    train_dataset = EEGDataset(
+        train_samples,
+        stft_cfg,
+        bands,
+        graph_path=graph_path,
+        fs=fs,
+        seg_len_s=seg_len_s,
+        seg_stride_s=seg_stride_s,
+    )
+    val_dataset = (
+        EEGDataset(
+            val_samples,
+            stft_cfg,
+            bands,
+            graph_path=graph_path,
+            fs=fs,
+            seg_len_s=seg_len_s,
+            seg_stride_s=seg_stride_s,
+        )
+        if val_samples
+        else None
+    )
     batch_size = cfg["train"]["batch_size"]
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, drop_last=True)
     val_loader = None

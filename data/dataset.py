@@ -45,6 +45,9 @@ class EEGDataset(Dataset):
         graph_path: Optional[Path] = None,
         transform: Optional[Callable[[torch.Tensor], torch.Tensor]] = None,
         node_feature_dim: int = 8,
+        fs: int = 250,
+        seg_len_s: float = 8.0,
+        seg_stride_s: Optional[float] = None,
     ) -> None:
         self.samples: List[EEGSample] = [self._ensure_sample(s) for s in samples]
         self.transform = transform
@@ -54,6 +57,12 @@ class EEGDataset(Dataset):
         self.bands = torch.tensor(bands, dtype=torch.float32)
         self.node_feature_dim = node_feature_dim
         self.graph_path = graph_path
+        self.fs = fs
+        self.seg_len = int(round(fs * seg_len_s))
+        if self.seg_len <= 0:
+            raise ValueError("Segment length must be positive.")
+        stride_seconds = seg_stride_s if seg_stride_s is not None else seg_len_s
+        self.seg_stride = max(1, int(round(fs * stride_seconds)))
         if graph_path is not None:
             graph_data = torch.load(graph_path, map_location="cpu")
             self.A = graph_data["A"].float()
@@ -63,6 +72,7 @@ class EEGDataset(Dataset):
         else:
             self.A = None
             self.L = None
+        self._segments: List[tuple[int, int]] = self._prepare_segments()
 
     @staticmethod
     def _ensure_sample(sample: EEGSample | Dict) -> EEGSample:
@@ -85,7 +95,7 @@ class EEGDataset(Dataset):
         )
 
     def __len__(self) -> int:  # type: ignore[override]
-        return len(self.samples)
+        return len(self._segments)
 
     def _compute_node_features(self, x: torch.Tensor, tf: int) -> torch.Tensor:
         # x: [C, T]
@@ -116,10 +126,17 @@ class EEGDataset(Dataset):
         return node_feat
 
     def __getitem__(self, index: int) -> Dict:  # type: ignore[override]
-        sample = self.samples[index]
-        x_raw = self._load_x_raw(sample)
+        sample_idx, start = self._segments[index]
+        sample = self.samples[sample_idx]
+        x_raw_full = self._load_x_raw(sample)
+        end = start + self.seg_len
+        segment = x_raw_full[:, start:end]
+        if segment.shape[-1] < self.seg_len:
+            pad = self.seg_len - segment.shape[-1]
+            segment = torch.nn.functional.pad(segment, (0, pad))
         if self.transform is not None:
-            x_raw = self.transform(x_raw)
+            segment = self.transform(segment)
+        x_raw = segment
         if x_raw.dim() != 2:
             raise ValueError("x_raw must be [C, T].")
         s_power, freqs, tf = self._stft_features(x_raw)
@@ -131,6 +148,7 @@ class EEGDataset(Dataset):
             "center": torch.tensor(sample.center_id, dtype=torch.long),
             "x_raw": x_raw,
         }
+        out["segment_start"] = torch.tensor(start, dtype=torch.long)
         if self.A is not None:
             out["A"] = self.A
         if self.L is not None:
@@ -148,6 +166,45 @@ class EEGDataset(Dataset):
         out["freqs"] = freqs
         out["subject_id"] = sample.subject_id
         return out
+
+    def _prepare_segments(self) -> List[tuple[int, int]]:
+        segments: List[tuple[int, int]] = []
+        for idx, sample in enumerate(self.samples):
+            length = self._probe_length(sample)
+            if length <= self.seg_len:
+                segments.append((idx, 0))
+                continue
+            start = 0
+            last_start = None
+            while start + self.seg_len <= length:
+                segments.append((idx, start))
+                last_start = start
+                start += self.seg_stride
+            tail_start = max(0, length - self.seg_len)
+            if last_start is None or tail_start != last_start:
+                segments.append((idx, tail_start))
+        if not segments:
+            raise RuntimeError("No segments could be generated from the provided samples.")
+        return segments
+
+    def _probe_length(self, sample: EEGSample) -> int:
+        if sample.x_raw is not None:
+            return sample.x_raw.shape[-1]
+        if sample.path is None:
+            raise ValueError("Sample has neither in-memory data nor file path.")
+        suffix = sample.path.suffix.lower()
+        if suffix == ".set":
+            try:
+                import mne
+            except ImportError as exc:  # pragma: no cover - informative failure path
+                raise ImportError(
+                    "Reading .set files requires the 'mne' package. Install it via 'pip install mne'."
+                ) from exc
+
+            raw = mne.io.read_raw_eeglab(str(sample.path), preload=False, verbose=False)
+            length = int(raw.n_times)
+            return length
+        raise ValueError(f"Unsupported EEG file format: {sample.path}")
 
     def _stft_features(self, x_raw: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, int]:
         stft = compute_stft(x_raw, window=self.window, hop=self.hop, nfft=self.nfft)
