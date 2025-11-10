@@ -151,9 +151,6 @@ def ensure_split_file(
 
 def build_dataloaders(cfg: Dict, args: argparse.Namespace) -> Tuple[DataLoader, DataLoader]:
     stft_cfg = cfg["stft"]
-    bands = cfg["bands"]
-    graph_path = cfg.get("graph_path")
-    graph_path = Path(graph_path) if graph_path else None
     data_file = Path(args.data_file)
     samples = list(load_samples(data_file))
     if args.split_file:
@@ -173,8 +170,6 @@ def build_dataloaders(cfg: Dict, args: argparse.Namespace) -> Tuple[DataLoader, 
     train_dataset = EEGDataset(
         train_samples,
         stft_cfg,
-        bands,
-        graph_path=graph_path,
         fs=fs,
         seg_len_s=seg_len_s,
         seg_stride_s=seg_stride_s,
@@ -183,11 +178,10 @@ def build_dataloaders(cfg: Dict, args: argparse.Namespace) -> Tuple[DataLoader, 
         EEGDataset(
             val_samples,
             stft_cfg,
-            bands,
-            graph_path=graph_path,
             fs=fs,
             seg_len_s=seg_len_s,
             seg_stride_s=seg_stride_s,
+            return_raw=False,
         )
         if val_samples
         else None

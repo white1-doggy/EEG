@@ -27,11 +27,14 @@ def load_model(cfg: Dict, checkpoint: Path, device: torch.device) -> FullModel:
 
 def build_dataset(cfg: Dict, data_path: Path) -> EEGDataset:
     stft_cfg = cfg["stft"]
-    bands = cfg["bands"]
     samples = torch.load(data_path)
-    graph_path = cfg.get("graph_path")
-    graph_path = Path(graph_path) if graph_path else None
-    return EEGDataset(samples, stft_cfg, bands, graph_path=graph_path)
+    return EEGDataset(
+        samples,
+        stft_cfg,
+        fs=int(cfg.get("fs", 250)),
+        seg_len_s=float(cfg.get("seg_len_s", 8.0)),
+        return_raw=True,
+    )
 
 
 def run_model(model: FullModel, batch: Dict[str, torch.Tensor], device: torch.device) -> Dict[str, torch.Tensor]:

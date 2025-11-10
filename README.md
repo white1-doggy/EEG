@@ -15,9 +15,8 @@ This repository implements a full training and evaluation pipeline for multimoda
 2. Prepare your dataset as a `torch.save` file containing a list of samples with the following keys:
    - `x_raw` – `FloatTensor [C, T]`
    - `center_id` – station/domain label
-   - `subject_id` – subject identifier (string)
    - `y` – class label `0..3`
-   - Optional teacher annotations: `welch_rel`, `fooof_slope`, `fooof_offset`, `pac_ref`
+   - Optional metadata such as `subject_id` is preserved for logging but not fed to the model.
 3. Optionally build a channel graph via `data/graph_build.py` (see `build_default_graph`).
 
 ## Training
