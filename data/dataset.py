@@ -29,44 +29,33 @@ class EEGDataset(Dataset):
     """Dataset that performs segmentation, STFT and feature alignment on-the-fly.
 
     The dataset expects a list of :class:`EEGSample` or dictionaries with matching keys.
-    Optional teacher targets are transparently forwarded to the model.
+    Only the tensors required by the training/evaluation pipeline are produced per item.
     """
 
     def __init__(
         self,
         samples: Sequence[EEGSample | Dict],
         stft_cfg: Dict,
-        bands: Sequence[Sequence[float]],
-        graph_path: Optional[Path] = None,
         transform: Optional[Callable[[torch.Tensor], torch.Tensor]] = None,
         node_feature_dim: int = 8,
         fs: int = 250,
         seg_len_s: float = 8.0,
         seg_stride_s: Optional[float] = None,
+        return_raw: bool = False,
     ) -> None:
         self.samples: List[EEGSample] = [self._ensure_sample(s) for s in samples]
         self.transform = transform
         self.window = int(stft_cfg["window"])
         self.hop = int(stft_cfg["hop"])
         self.nfft = int(stft_cfg["nfft"])
-        self.bands = torch.tensor(bands, dtype=torch.float32)
         self.node_feature_dim = node_feature_dim
-        self.graph_path = graph_path
+        self.return_raw = return_raw
         self.fs = fs
         self.seg_len = int(round(fs * seg_len_s))
         if self.seg_len <= 0:
             raise ValueError("Segment length must be positive.")
         stride_seconds = seg_stride_s if seg_stride_s is not None else seg_len_s
         self.seg_stride = max(1, int(round(fs * stride_seconds)))
-        if graph_path is not None:
-            graph_data = torch.load(graph_path, map_location="cpu")
-            self.A = graph_data["A"].float()
-            self.L = graph_data.get("L")
-            if self.L is not None:
-                self.L = self.L.float()
-        else:
-            self.A = None
-            self.L = None
         self._segments: List[tuple[int, int]] = self._prepare_segments()
 
     @staticmethod
@@ -137,10 +126,9 @@ class EEGDataset(Dataset):
             "X_node": node_feat,
             "y": torch.tensor(sample.y, dtype=torch.long),
             "center": torch.tensor(sample.center_id, dtype=torch.long),
-            "x_raw": x_raw,
         }
-        if self.A is not None:
-            out["A"] = self.A
+        if self.return_raw:
+            out["x_raw"] = x_raw
         return out
 
     def _prepare_segments(self) -> List[tuple[int, int]]:

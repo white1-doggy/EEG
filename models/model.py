@@ -23,12 +23,17 @@ class FullModel(nn.Module):
         model_cfg = cfg.get("model", {})
         e_total = model_cfg.get("E_spec", 128) + model_cfg.get("E_graph", 64) + model_cfg.get("E_cfc", 32)
         self.classifier = nn.Linear(self.temporal.dim, 4)
+        graph_path = cfg.get("graph_path")
+        self.adjacency = None
+        if graph_path:
+            graph_data = torch.load(graph_path, map_location="cpu")
+            self.adjacency = graph_data["A"].float()
 
     def forward(self, batch: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
         s_power = batch["S_power"]
         x_node = batch["X_node"]
-        adjacency = batch.get("A")
-        if adjacency is None or adjacency.numel() == 0:
+        adjacency = self.adjacency
+        if adjacency is None:
             c = s_power.shape[1]
             adjacency = torch.eye(c, device=s_power.device)
         else:
